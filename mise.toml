@@ -1,0 +1,18 @@
+[tools]
+python = '3.12.3'
+uv = '0.8.19'
+
+[tasks.sync]
+run = "uv sync --extra macos --all-groups"
+
+[tasks.lint]
+run = "uv run ruff check ."
+
+[tasks.format]
+run = "uv run ruff format ."
+
+[tasks.test]
+run = "uv run pytest"
+
+[env]
+UV_PROJECT_ENVIRONMENT = ".venv.darwin-arm64"

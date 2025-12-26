@@ -1,0 +1,10 @@
+{
+  "python.defaultInterpreterPath": "./.venv.darwin-arm64/bin/python",
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  "python.analysis.typeCheckingMode": "basic"
+}

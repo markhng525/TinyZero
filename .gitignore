@@ -100,8 +100,8 @@ ENV/
 # Rope project settings
 .ropeproject
 
-# vscode
-.vscode
+# vscode - tracked for team consistency
+# .vscode
 
 # Mac
 .DS_Store

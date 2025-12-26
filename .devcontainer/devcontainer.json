@@ -1,0 +1,43 @@
+{
+  "name": "TinyZero DGX",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "runArgs": [
+    "--gpus=all",
+    "--shm-size=16g",
+    "--ulimit",
+    "memlock=-1",
+    "--ulimit",
+    "stack=67108864",
+    "--ipc=host"
+  ],
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    "type=volume,source=uv-cache,target=/root/.cache/uv"
+  ],
+  "containerEnv": {
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
+    "UV_PROJECT_ENVIRONMENT": ".venv.linux-aarch64"
+  },
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "uv venv --system-site-packages && uv sync --extra gpu --all-groups",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "ms-toolsai.jupyter-renderers"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "./.venv.linux-aarch64/bin/python"
+      }
+    }
+  }
+}

@@ -21,7 +21,7 @@ dynamic = ["version"]
 description = "veRL: Volcano Engine Reinforcement Learning for LLM"
 license = {file = "LICENSE"}  # or "Apache-2.0", if you prefer an SPDX identifier
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.8"
+requires-python = ">=3.10,<3.14"
 
 authors = [
   { name = "Bytedance - Seed - MLSys", email = "zhangchi.usc1992@bytedance.com" },
@@ -29,6 +29,7 @@ authors = [
 ]
 
 # Dependencies corresponding to install_requires in setup.py
+# Note: vllm and transformers constraints relaxed for DGX Spark compatibility
 dependencies = [
     "accelerate",
     "codetiming",
@@ -37,17 +38,25 @@ dependencies = [
     "hydra-core",
     "numpy",
     "pybind11",
-    "ray",
-    "tensordict",
-    "transformers<4.48",
-    "vllm<=0.6.3",
+    "ray[default]",
+    "tensordict>=0.8.0",
+    "transformers",
+    "wandb",
 ]
 
-# Optional dependencies (extras_require in setup.py)
+# Optional dependencies
 [project.optional-dependencies]
-test = [
-  "pytest", "yapf"
-]
+# For local Mac development (MPS acceleration)
+macos = ["torch>=2.4.0"]
+# For DGX/GPU training - install vllm separately based on platform
+gpu = ["vllm>=0.8.0"]
+test = ["pytest", "pytest-cov"]
+
+# Development dependency groups (modern uv pattern)
+[dependency-groups]
+dev = ["ipykernel", "ipython", "matplotlib", "pandas"]
+test = ["pytest", "pytest-cov"]
+lint = ["ruff>=0.8.0"]
 
 # URLs
 [project.urls]
@@ -75,4 +84,21 @@ version = {file = "verl/version/version"}
 verl = [
   "version/*",
   "trainer/config/*.yaml"
+]
+
+# -------------------------------
+# Ruff configuration
+# -------------------------------
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["B", "C", "E", "F", "W"]
+ignore = ["E402", "E501", "E731", "C901"]
+exclude = [
+    ".git",
+    ".venv*",
+    "__pycache__",
+    "build",
+    "dist",
 ]
