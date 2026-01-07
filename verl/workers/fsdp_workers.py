@@ -164,7 +164,7 @@ class ActorRolloutRefWorker(Worker):
             actor_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                 torch_dtype=torch_dtype,
                                                                 config=actor_model_config,
-                                                                attn_implementation='flash_attention_2',
+                                                                attn_implementation='sdpa',
                                                                 trust_remote_code=trust_remote_code)
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -261,6 +261,18 @@ class ActorRolloutRefWorker(Worker):
             rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
+        elif self.config.rollout.name == 'sglang':
+            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            from verl.workers.sharding_manager import BaseShardingManager
+            log_gpu_memory_usage('Before building sglang rollout', logger=None)
+            rollout = SGLangRollout(actor_module=self.actor_module_fsdp,
+                                    config=self.config.rollout,
+                                    tokenizer=self.tokenizer,
+                                    model_hf_config=self.actor_model_config)
+            log_gpu_memory_usage('After building sglang rollout', logger=None)
+            # SGLang handles weight loading internally, use base sharding manager
+            rollout_sharding_manager = BaseShardingManager()
+
         elif self.config.rollout.name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout
             from verl.workers.sharding_manager import FSDPVLLMShardingManager
@@ -278,6 +290,9 @@ class ActorRolloutRefWorker(Worker):
                                                                full_params='hf' in self.config.rollout.load_format,
                                                                device_mesh=rollout_device_mesh)
             log_gpu_memory_usage('After building sharding manager', logger=None)
+
+        else:
+            raise ValueError(f"Unknown rollout name: {self.config.rollout.name}. Supported: hf, sglang, vllm")
 
         return rollout, rollout_sharding_manager
 
@@ -589,7 +604,7 @@ class CriticWorker(Worker):
             critic_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             torch_dtype=torch_dtype,
                                                                             config=critic_model_config,
-                                                                            attn_implementation='flash_attention_2',
+                                                                            attn_implementation='sdpa',
                                                                             trust_remote_code=trust_remote_code)
 
             # some parameters may not in torch_dtype
@@ -829,7 +844,7 @@ class RewardModelWorker(Worker):
             reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             config=model_config,
                                                                             torch_dtype=torch.bfloat16,
-                                                                            attn_implementation='flash_attention_2',
+                                                                            attn_implementation='sdpa',
                                                                             trust_remote_code=trust_remote_code)
             reward_module.to(torch.bfloat16)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)

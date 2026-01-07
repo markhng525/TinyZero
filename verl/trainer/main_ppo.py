@@ -98,7 +98,24 @@ import hydra
 def main(config):
     if not ray.is_initialized():
         # this is for local ray cluster
-        ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
+        # Exclude pyproject.toml/uv.lock to prevent uv from creating fresh venvs in Ray workers
+        # This ensures workers can access system site-packages (e.g., from Docker base image)
+        ray.init(runtime_env={
+            'working_dir': '.',
+            'excludes': [
+                '/.git/',
+                '/.venv*/',
+                '/data/',
+                '/checkpoints/',
+                '/experiments/logs/',
+                'pyproject.toml',  # Exclude to prevent uv from triggering
+                'uv.lock',         # Exclude uv lock file
+            ],
+            'env_vars': {
+                'TOKENIZERS_PARALLELISM': 'true',
+                'NCCL_DEBUG': 'WARN',
+            }
+        })
 
     ray.get(main_task.remote(config))
 

@@ -240,6 +240,12 @@ class RayWorkerGroup(WorkerGroup):
                     'RAY_LOCAL_WORLD_SIZE': str(local_world_size),
                     'RAY_LOCAL_RANK': str(local_rank),
                 }
+                # Propagate SGLang environment variables for GB10 compatibility
+                for sglang_var in ['SGLANG_KERNEL_DISABLE', 'SGLANG_ATTENTION_BACKEND',
+                                   'SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK', 'SGL_KERNEL_DISABLE',
+                                   'SGLANG_DISABLE_SGL_KERNEL']:
+                    if sglang_var in os.environ:
+                        env_vars[sglang_var] = os.environ[sglang_var]
                 if rank != 0:
                     env_vars['MASTER_ADDR'] = self._master_addr
                     env_vars['MASTER_PORT'] = self._master_port

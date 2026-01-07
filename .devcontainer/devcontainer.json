@@ -1,5 +1,5 @@
 {
-  "name": "TinyZero DGX",
+  "name": "TinyZero DGX Spark SGLang",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."
@@ -16,24 +16,36 @@
   "remoteUser": "root",
   "mounts": [
     "source=${localWorkspaceFolder},target=/workspace,type=bind",
-    "type=volume,source=uv-cache,target=/root/.cache/uv"
+    "type=volume,source=uv-cache,target=/root/.cache/uv",
+    "type=volume,source=claude-credentials,target=/root/.claude"
   ],
   "containerEnv": {
     "NVIDIA_VISIBLE_DEVICES": "all",
     "NVIDIA_DRIVER_CAPABILITIES": "compute,utility",
-    "UV_PROJECT_ENVIRONMENT": ".venv.linux-aarch64"
+    "UV_PROJECT_ENVIRONMENT": ".venv.linux-aarch64",
+    "UV_NO_SYNC": "1",
+    // "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK": "True",
+    "SGLANG_ATTENTION_BACKEND": "flashinfer",
+    "TORCH_ATTENTION_BACKEND": "sdpa"
   },
   "workspaceFolder": "/workspace",
-  "postCreateCommand": "uv venv --system-site-packages && uv sync --extra gpu --all-groups",
+  "postCreateCommand": "uv venv --system-site-packages && uv sync --all-groups",
   "customizations": {
     "vscode": {
       "extensions": [
+        "anthropic.claude-code",
         "ms-python.python",
+        "ms-python.vscode-pylance",
         "charliermarsh.ruff",
         "tamasfe.even-better-toml",
         "ms-toolsai.jupyter",
         "ms-toolsai.jupyter-keymap",
-        "ms-toolsai.jupyter-renderers"
+        "ms-toolsai.jupyter-renderers",
+        "ms-toolsai.vscode-jupyter-cell-tags",
+        "ms-toolsai.vscode-jupyter-slideshow",
+        "meta.pyrefly",
+        "yzhang.markdown-all-in-one",
+        "davidanson.vscode-markdownlint"
       ],
       "settings": {
         "python.defaultInterpreterPath": "./.venv.linux-aarch64/bin/python"

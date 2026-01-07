@@ -1,10 +1,66 @@
 {
-  "python.defaultInterpreterPath": "./.venv.darwin-arm64/bin/python",
+  "python.testing.cwd": "${workspaceFolder}",
   "[python]": {
-    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.tabSize": 4,
+    "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
-      "source.organizeImports.ruff": "explicit"
+      "source.organizeImports.ruff": "explicit",
+      "source.fixAll": "explicit"
+    },
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+  // https://github.com/facebook/pyrefly/issues/372
+  "python.languageServer": "Pylance",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.pyrefly.disableLanguageServices": true,
+  "python.pyrefly.displayTypeErrors": "force-on",
+  "editor.inlayHints.enabled": "off",
+  "ruff.organizeImports": true,
+  "editor.rulers": [88],
+  "editor.insertSpaces": true,
+  "editor.trimAutoWhitespace": true,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/*.pyc": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true,
+    "_dist/**": true,
+    "**/node_modules": true,
+    "**/.git": false
+  },
+  "search.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "_dist/**": true,
+    "**/node_modules": true,
+    "**/.git": true,
+    "uv.lock": true,
+    "yarn.lock": true
+  },
+  "git.autofetch": true,
+  "git.enableSmartCommit": true,
+  "jupyter.askForKernelRestart": false,
+  "jupyter.interactiveWindow.textEditor.executeSelection": true,
+  "[markdown]": {
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "comments": "off",
+      "strings": "off",
+      "other": "off"
     }
   },
-  "python.analysis.typeCheckingMode": "basic"
+  "[yaml]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+  "[json]": {
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+  "python.terminal.activateEnvironment": false,
+  "python.defaultInterpreterPath": "./.venv.darwin-arm64/bin/python"
 }

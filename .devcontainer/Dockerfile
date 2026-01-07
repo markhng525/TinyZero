@@ -1,17 +1,17 @@
-# NGC PyTorch with ARM64 support for DGX Spark
-# Note: hiyouga/verl is x86_64 only, so we use NGC and install deps
-FROM nvcr.io/nvidia/pytorch:25.09-py3
+# SGLang Spark image for DGX Spark (ARM64/GB10)
+# Includes: CUDA 13.0, PyTorch 2.9.0+cu130, FlashInfer 0.4.0, triton 3.5.0
+FROM lmsysorg/sglang:spark
 
-# Install uv for package management
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    ln -sf /root/.local/bin/uv /usr/local/bin/uv
-
-# Build tools for flash-attn compilation (if needed)
-RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/lists/*
-
-ENV PATH="/root/.local/bin:${PATH}"
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PATH="/root/.claude/bin:/root/.local/bin:/usr/local/bin:${PATH}"
 
-# Unset NGC constraint file for custom package versions
-ENV PIP_CONSTRAINT=""
+# Install uv for package management (install to /usr/local/bin directly)
+RUN curl -LsSf https://astral.sh/uv/install.sh | env CARGO_HOME=/usr/local UV_INSTALL_DIR=/usr/local/bin sh
+
+# Install Node.js for Claude Code CLI (native installer has ARM64 bugs)
+RUN apt-get update && apt-get install -y nodejs npm && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code
+
+# Ensure PATH is set for interactive shells
+RUN echo 'export PATH="/root/.claude/bin:/root/.local/bin:/usr/local/bin:$PATH"' >> /root/.bashrc
