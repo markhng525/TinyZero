@@ -68,14 +68,30 @@ def logprobs_from_logits_flash_attn(logits, labels):
 
 
 def logprobs_from_logits_naive(logits, labels):
-    logp = F.log_softmax(logits, dim=-1)
-    logpy = gather_from_labels(logp, labels)
-    return logpy
+    """Compute log probabilities at label positions from logits.
+
+    For large vocab sizes, uses memory-efficient approach that avoids materializing
+    the full [batch, seq, vocab] log_softmax tensor.
+    """
+    # For smaller tensors, use standard implementation (faster)
+    # Threshold: 100M elements ~ 400 MB in bf16, 800 MB in fp32
+    if logits.numel() < 100_000_000:
+        logp = F.log_softmax(logits, dim=-1)
+        logpy = gather_from_labels(logp, labels)
+        return logpy
+
+    # Memory-efficient: gather first, then compute log_softmax at those positions only
+    # log_softmax(x)_i = x_i - logsumexp(x)
+    # We only need log_softmax at the label positions
+    logprobs_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1))
+    logprobs_labels = logprobs_labels - torch.logsumexp(logits, dim=-1, keepdim=True)
+    return logprobs_labels.squeeze(-1)
 
 
 def logprobs_of_labels_v2(logits: torch.FloatTensor, labels):
     """
     A memory efficient implementation of logprobs_from_logits
+    Note: Now integrated into logprobs_from_logits_naive for large tensors.
     """
     assert logits.dtype == torch.float32, 'Using bf16 logits with logprobs_of_labels_v2 may lead to divergence'
     logprobs_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1))
@@ -93,9 +109,64 @@ def clip_by_value(x, tensor_min, tensor_max):
 
 
 def entropy_from_logits(logits: torch.Tensor):
-    """Calculate entropy from logits."""
-    pd = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    """Calculate entropy from logits.
+
+    Entropy = -sum(p * log(p)) = logsumexp(logits) - sum(softmax(logits) * logits)
+
+    For large vocab sizes (>100K), uses chunked computation to avoid materializing
+    the full [batch, seq, vocab] softmax tensor, which can cause OOM.
+    """
+    # For smaller tensors, use standard implementation (faster)
+    # Threshold: 100M elements ~ 400 MB in bf16, 800 MB in fp32
+    if logits.numel() < 100_000_000:
+        pd = torch.nn.functional.softmax(logits, dim=-1)
+        entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+        return entropy
+
+    # Memory-efficient chunked implementation for large vocab
+    # Compute logsumexp once - only creates [B, S] tensor
+    logsumexp_val = torch.logsumexp(logits, dim=-1)  # [..., seq_len]
+
+    # Compute sum(softmax(logits) * logits) in chunks to avoid full softmax materialization
+    # softmax(logits) = exp(logits - logsumexp)
+    vocab_size = logits.shape[-1]
+    chunk_size = 32768  # ~32K vocab elements per chunk
+    weighted_sum = torch.zeros_like(logsumexp_val)
+
+    for start in range(0, vocab_size, chunk_size):
+        end = min(start + chunk_size, vocab_size)
+        logits_chunk = logits[..., start:end]
+        # softmax_chunk = exp(logits_chunk - logsumexp) / Z = exp(logits_chunk) / sum(exp(logits))
+        # But we already have logsumexp, so: softmax_chunk = exp(logits_chunk - logsumexp)
+        softmax_chunk = torch.exp(logits_chunk - logsumexp_val.unsqueeze(-1))
+        weighted_sum = weighted_sum + (softmax_chunk * logits_chunk).sum(dim=-1)
+        # Explicitly delete to help memory
+        del logits_chunk, softmax_chunk
+
+    entropy = logsumexp_val - weighted_sum
+    return entropy
+
+
+def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 2048) -> torch.Tensor:
+    """Memory-efficient entropy calculation using batch-dimension chunked processing.
+
+    This is the upstream veRL-compatible API that chunks along the batch dimension.
+    For very large vocab sizes, consider using entropy_from_logits() which also
+    chunks along the vocab dimension for even better memory efficiency.
+
+    Args:
+        logits: Tensor of shape [batch, vocab] or [batch*seq, vocab]
+        chunk_size: Number of batch elements to process at once (default: 2048)
+
+    Returns:
+        entropy: Tensor of shape [batch] or [batch*seq]
+    """
+    entropy = torch.zeros(logits.shape[0], device=logits.device, dtype=logits.dtype)
+    for i in range(0, logits.shape[0], chunk_size):
+        logits_chunk = logits[i:i + chunk_size].float()
+        pd_chunk = torch.nn.functional.softmax(logits_chunk, dim=-1)
+        entropy_chunk = torch.logsumexp(logits_chunk, dim=-1) - torch.sum(pd_chunk * logits_chunk, dim=-1)
+        entropy[i:i + chunk_size] = entropy_chunk.to(entropy.dtype)
     return entropy
 
 

@@ -28,7 +28,7 @@ from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import register, Dispatch
 from verl.utils import hf_tokenizer
-from verl.utils.debug import log_gpu_memory_usage
+from verl.utils.debug import log_gpu_memory_usage, log_comprehensive_memory
 from verl.utils.fs import copy_local_path_from_hdfs
 from verl.utils.fsdp_utils import get_fsdp_wrap_policy, offload_fsdp_grad, init_fn, get_init_weight_context_manager
 from verl.utils.fsdp_utils import offload_fsdp_optimizer, offload_fsdp_param_and_grad, load_fsdp_optimizer, \
@@ -262,16 +262,82 @@ class ActorRolloutRefWorker(Worker):
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
         elif self.config.rollout.name == 'sglang':
+            # SGLang rollout with disk-based weight sync (HybridEngine pattern)
+            # Uses update_weights_from_disk to avoid CUDA context conflicts in Ray.
+            # See: experiments/SGLANG_WEIGHT_SYNC_RESEARCH.md
             from verl.workers.rollout.sglang_rollout import SGLangRollout
-            from verl.workers.sharding_manager import BaseShardingManager
+            from verl.workers.sharding_manager import FSDPSGLangShardingManager
             log_gpu_memory_usage('Before building sglang rollout', logger=None)
             rollout = SGLangRollout(actor_module=self.actor_module_fsdp,
                                     config=self.config.rollout,
                                     tokenizer=self.tokenizer,
                                     model_hf_config=self.actor_model_config)
             log_gpu_memory_usage('After building sglang rollout', logger=None)
-            # SGLang handles weight loading internally, use base sharding manager
-            rollout_sharding_manager = BaseShardingManager()
+            # Set load_format for single GPU (matches vLLM pattern)
+            if torch.distributed.get_world_size() == 1:
+                self.config.rollout.load_format = 'dummy_hf'
+            rollout_sharding_manager = FSDPSGLangShardingManager(
+                module=self.actor_module_fsdp,
+                inference_engine=rollout.inference_engine,
+                model_config=self.actor_model_config,
+                full_params='hf' in self.config.rollout.get('load_format', 'dummy'),
+                device_mesh=rollout_device_mesh,
+            )
+            log_gpu_memory_usage('After building SGLang sharding manager', logger=None)
+
+        elif self.config.rollout.name == 'sglang_server':
+            # SGLang HTTP Server mode - runs SGLang as a separate process
+            # Completely isolates from Ray's CUDA context to avoid conflicts.
+            # Recommended for production use with single GPU or complex Ray setups.
+            from verl.workers.rollout.sglang_rollout import SGLangServerRollout
+            from verl.workers.sharding_manager import FSDPSGLangShardingManager
+            log_gpu_memory_usage('Before building sglang server rollout', logger=None)
+            rollout = SGLangServerRollout(actor_module=self.actor_module_fsdp,
+                                          config=self.config.rollout,
+                                          tokenizer=self.tokenizer,
+                                          model_hf_config=self.actor_model_config)
+            log_gpu_memory_usage('After building sglang server rollout', logger=None)
+            rollout_sharding_manager = FSDPSGLangShardingManager(
+                module=self.actor_module_fsdp,
+                inference_engine=rollout.inference_engine,
+                model_config=self.actor_model_config,
+                full_params=True,
+                device_mesh=rollout_device_mesh,
+            )
+            log_gpu_memory_usage('After building SGLang server sharding manager', logger=None)
+
+        elif self.config.rollout.name == 'sglang_actor':
+            # SGLang Ray Actor mode - runs SGLang as a separate Ray actor
+            # This provides clean CUDA context isolation while using Ray for
+            # efficient communication. Enables larger batch sizes compared to
+            # colocated mode by avoiding CUDA context conflicts.
+            # See: experiments/SGLANG_ARCHITECTURE_ANALYSIS.md
+            from verl.workers.rollout.sglang_rollout.sglang_ray_actor import SGLangActorRollout
+            from verl.workers.sharding_manager import SeparateSGLangShardingManager
+            from omegaconf import OmegaConf
+            log_gpu_memory_usage('Before building sglang actor rollout', logger=None)
+
+            # Add model_path to config if not present (need to disable struct mode)
+            if not self.config.rollout.get('model_path'):
+                OmegaConf.set_struct(self.config.rollout, False)
+                self.config.rollout.model_path = self.config.model.path
+                OmegaConf.set_struct(self.config.rollout, True)
+
+            rollout = SGLangActorRollout(
+                actor_module=self.actor_module_fsdp,
+                config=self.config.rollout,
+                tokenizer=self.tokenizer,
+                model_hf_config=self.actor_model_config,
+            )
+            log_gpu_memory_usage('After building sglang actor rollout', logger=None)
+            rollout_sharding_manager = SeparateSGLangShardingManager(
+                module=self.actor_module_fsdp,
+                sglang_actor=rollout.inference_actor,
+                model_config=self.actor_model_config,
+                device_mesh=rollout_device_mesh,
+                sync_timeout=600.0,  # 10 minutes for weight sync (1.5B model is slow)
+            )
+            log_gpu_memory_usage('After building separate SGLang sharding manager', logger=None)
 
         elif self.config.rollout.name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout
@@ -292,7 +358,7 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         else:
-            raise ValueError(f"Unknown rollout name: {self.config.rollout.name}. Supported: hf, sglang, vllm")
+            raise ValueError(f"Unknown rollout name: {self.config.rollout.name}. Supported: hf, sglang, sglang_server, sglang_actor, vllm")
 
         return rollout, rollout_sharding_manager
 
@@ -370,6 +436,9 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         data = data.to('cuda')
+        batch_size = data.batch.batch_size[0] if hasattr(data.batch, 'batch_size') else 0
+
+        log_comprehensive_memory("ACTOR_UPDATE", "start", sequences=int(batch_size))
 
         assert self._is_actor
         if self._is_offload_param:
@@ -382,6 +451,7 @@ class ActorRolloutRefWorker(Worker):
         data.batch = data.batch.cuda()
 
         log_gpu_memory_usage('Before update policy', logger=logger)
+        log_comprehensive_memory("ACTOR_UPDATE", "before_training", sequences=int(batch_size))
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -398,6 +468,7 @@ class ActorRolloutRefWorker(Worker):
             metrics['actor/lr'] = lr
 
             log_gpu_memory_usage('After update policy', logger=logger)
+            log_comprehensive_memory("ACTOR_UPDATE", "after_training", sequences=int(batch_size))
 
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={'metrics': metrics})
@@ -410,6 +481,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
         torch.cuda.empty_cache()
+        log_comprehensive_memory("ACTOR_UPDATE", "complete", sequences=int(batch_size))
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
@@ -444,11 +516,16 @@ class ActorRolloutRefWorker(Worker):
             output.meta_info['use_dynamic_bsz'] = self.config.rollout.log_prob_use_dynamic_bsz
             output.meta_info['temperature'] = self.config.rollout.temperature
             # perform recompute log_prob
+            num_seqs = output.batch.batch_size[0] if hasattr(output.batch, 'batch_size') else 0
+            log_comprehensive_memory("RECOMPUTE_LOG_PROB", "start", sequences=int(num_seqs))
             with self.ulysses_sharding_manager:
                 output = self.ulysses_sharding_manager.preprocess_data(output)
+                log_comprehensive_memory("RECOMPUTE_LOG_PROB", "before_compute", sequences=int(num_seqs))
                 old_log_probs = self.actor.compute_log_prob(data=output)
+                log_comprehensive_memory("RECOMPUTE_LOG_PROB", "after_compute", sequences=int(num_seqs))
                 output.batch['old_log_probs'] = old_log_probs
                 output = self.ulysses_sharding_manager.postprocess_data(output)
+            log_comprehensive_memory("RECOMPUTE_LOG_PROB", "complete", sequences=int(num_seqs))
 
         output = output.to('cpu')
 
@@ -463,8 +540,11 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data: DataProto):
         assert self._is_ref
+        batch_size = data.batch.batch_size[0] if hasattr(data.batch, 'batch_size') else 0
+        log_comprehensive_memory("REF_LOG_PROB", "start", sequences=int(batch_size))
 
         data = data.to('cuda')
+        log_comprehensive_memory("REF_LOG_PROB", "after_to_cuda", sequences=int(batch_size))
 
         if self._is_offload_param:
             load_fsdp_param_and_grad(module=self.ref_module_fsdp,
@@ -476,17 +556,20 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info['temperature'] = self.config.rollout.temperature
         data.meta_info['max_token_len'] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info['use_dynamic_bsz'] = self.config.ref.log_prob_use_dynamic_bsz
+        log_comprehensive_memory("REF_LOG_PROB", "before_compute", sequences=int(batch_size))
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             output = self.ref_policy.compute_log_prob(data=data)
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
+        log_comprehensive_memory("REF_LOG_PROB", "after_compute", sequences=int(batch_size))
 
         output = output.to('cpu')
 
         if self._is_offload_param:
             offload_fsdp_param_and_grad(module=self.ref_module_fsdp, offload_grad=self._is_offload_grad)
         torch.cuda.empty_cache()
+        log_comprehensive_memory("REF_LOG_PROB", "complete", sequences=int(batch_size))
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

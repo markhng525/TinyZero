@@ -31,3 +31,7 @@ if is_vllm_available():
     from .fsdp_vllm import FSDPVLLMShardingManager
 else:
     FSDPVLLMShardingManager = None
+
+# SGLang sharding managers - always available since they only depend on SGLang
+from .fsdp_sglang import FSDPSGLangShardingManager
+from .separate_sglang import SeparateSGLangShardingManager

@@ -700,6 +700,11 @@ class RayPPOTrainer(object):
                             gen_batch
                         )
 
+                    # Memory debug logging
+                    import psutil
+                    proc = psutil.Process()
+                    print(f"[DRIVER_MEMORY] after_generate: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
+
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))],
                         dtype=object,
@@ -709,12 +714,16 @@ class RayPPOTrainer(object):
                         repeat_times=self.config.actor_rollout_ref.rollout.n,
                         interleave=True,
                     )
+                    print(f"[DRIVER_MEMORY] after_repeat: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
+
                     batch = batch.union(gen_batch_output)
+                    print(f"[DRIVER_MEMORY] after_union: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     self._balance_batch(batch, metrics=metrics)
+                    print(f"[DRIVER_MEMORY] after_balance: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(
@@ -723,11 +732,13 @@ class RayPPOTrainer(object):
 
                     if self.use_reference_policy:
                         # compute reference log_prob
+                        print(f"[DRIVER_MEMORY] before_ref_log_prob: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
                         with _timer("ref", timing_raw):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(
                                 batch
                             )
                             batch = batch.union(ref_log_prob)
+                        print(f"[DRIVER_MEMORY] after_ref_log_prob: process_mem={proc.memory_info().rss/1e9:.2f}GB, system_mem={psutil.virtual_memory().used/1e9:.2f}GB")
 
                     # compute values
                     if self.use_critic:

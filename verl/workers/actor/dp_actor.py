@@ -19,6 +19,7 @@ import itertools
 from typing import Iterable, Tuple
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -55,10 +56,33 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer = actor_optimizer
         self.use_remove_padding = self.config.get('use_remove_padding', False)
         print(f'Actor use_remove_padding={self.use_remove_padding}')
+
+        # Upstream veRL-compatible config options for memory-efficient entropy
+        self.entropy_from_logits_with_chunking = self.config.get('entropy_from_logits_with_chunking', False)
+        self.entropy_checkpointing = self.config.get('entropy_checkpointing', False)
+
+        # DEBUG: Log memory optimization settings
+        import os
+        if os.environ.get('VERL_DEBUG_MEMORY', '0') == '1':
+            from verl.utils.torch_functional import FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE
+            print(f'[DEBUG] Flash-Attn cross-entropy available: {FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE}')
+            print(f'[DEBUG] entropy_from_logits_with_chunking: {self.entropy_from_logits_with_chunking}')
+            print(f'[DEBUG] entropy_checkpointing: {self.entropy_checkpointing}')
+
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
-        self.compute_entropy_from_logits = torch.compile(verl_F.entropy_from_logits, dynamic=True)
+        # Select entropy function based on config
+        # Note: entropy_from_logits already has vocab-chunking for large tensors (>100M elements)
+        # entropy_from_logits_with_chunking chunks along batch dimension (upstream API)
+        if self.entropy_from_logits_with_chunking:
+            entropy_fn = verl_F.entropy_from_logits_with_chunking
+            print(f'Actor using entropy_from_logits_with_chunking (batch-dimension chunking)')
+        else:
+            entropy_fn = verl_F.entropy_from_logits
+            print(f'Actor using entropy_from_logits (auto vocab-chunking for large tensors)')
+
+        self.compute_entropy_from_logits = torch.compile(entropy_fn, dynamic=True)
 
     def _forward_micro_batch(self, micro_batch, temperature) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -107,8 +131,13 @@ class DataParallelPPOActor(BasePPOActor):
 
                 logits_rmpad.div_(temperature)
 
-                # compute entropy
-                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                # compute entropy (with optional checkpointing to save memory during backward)
+                if self.entropy_checkpointing:
+                    entropy_rmpad = torch.utils.checkpoint.checkpoint(
+                        self.compute_entropy_from_logits, logits_rmpad, use_reentrant=False
+                    )
+                else:
+                    entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
@@ -143,8 +172,37 @@ class DataParallelPPOActor(BasePPOActor):
                 logits = output.logits
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1:-1]  # (bsz, response_length)
+
+                # DEBUG: Memory profiling for OOM investigation
+                import os
+                if os.environ.get('VERL_DEBUG_MEMORY', '0') == '1':
+                    torch.cuda.synchronize()
+                    mem_before = torch.cuda.memory_allocated() / 1e9
+                    print(f"[DEBUG] logits shape: {logits.shape}, dtype: {logits.dtype}")
+                    print(f"[DEBUG] logits numel: {logits.numel():,} elements = {logits.numel() * logits.element_size() / 1e9:.2f} GB")
+                    print(f"[DEBUG] Memory before entropy/logprobs: {mem_before:.2f} GB")
+
                 log_probs = logprobs_from_logits(logits, micro_batch['responses'])
-                entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+
+                # DEBUG: After log_probs
+                if os.environ.get('VERL_DEBUG_MEMORY', '0') == '1':
+                    torch.cuda.synchronize()
+                    mem_after_logprobs = torch.cuda.memory_allocated() / 1e9
+                    print(f"[DEBUG] Memory after logprobs_from_logits: {mem_after_logprobs:.2f} GB (+{mem_after_logprobs - mem_before:.2f} GB)")
+
+                # compute entropy (with optional checkpointing to save memory during backward)
+                if self.entropy_checkpointing:
+                    entropy = torch.utils.checkpoint.checkpoint(
+                        self.compute_entropy_from_logits, logits, use_reentrant=False
+                    )
+                else:
+                    entropy = self.compute_entropy_from_logits(logits)  # (bsz, response_length)
+
+                # DEBUG: After entropy
+                if os.environ.get('VERL_DEBUG_MEMORY', '0') == '1':
+                    torch.cuda.synchronize()
+                    mem_after_entropy = torch.cuda.memory_allocated() / 1e9
+                    print(f"[DEBUG] Memory after entropy_from_logits: {mem_after_entropy:.2f} GB (+{mem_after_entropy - mem_after_logprobs:.2f} GB)")
 
             return entropy, log_probs
 

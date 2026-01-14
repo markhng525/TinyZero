@@ -15,6 +15,7 @@
 import torch
 import torch.distributed as dist
 import logging
+import os
 
 
 def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.DEBUG, rank: int = 0):
@@ -28,3 +29,70 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging
             print(message)
         else:
             logger.log(msg=message, level=level)
+
+
+def log_comprehensive_memory(phase: str, context: str = "", sequences: int = 0):
+    """
+    Log comprehensive memory metrics for debugging memory issues.
+
+    This logs:
+    1. PyTorch allocated/reserved (tensor memory)
+    2. CUDA free memory (what SGLang sees for KV cache)
+    3. System memory (what Ray monitors for OOM)
+
+    Args:
+        phase: Name of the training phase (e.g., "GENERATION", "ACTOR_UPDATE")
+        context: Additional context (e.g., "before", "after")
+        sequences: Number of sequences being processed (for reference)
+    """
+    torch.cuda.synchronize()
+
+    # PyTorch memory tracking
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved = torch.cuda.memory_reserved() / 1024**3
+
+    # CUDA free memory (what SGLang sees)
+    cuda_free, cuda_total = torch.cuda.mem_get_info()
+    cuda_free_gb = cuda_free / 1024**3
+    cuda_total_gb = cuda_total / 1024**3
+    cuda_used_gb = cuda_total_gb - cuda_free_gb
+
+    # System memory (what Ray monitors) - only on Linux
+    system_used_gb = 0
+    system_total_gb = 0
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = {}
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(':')] = int(parts[1])
+            system_total_gb = meminfo.get('MemTotal', 0) / 1024 / 1024
+            system_available_gb = meminfo.get('MemAvailable', 0) / 1024 / 1024
+            system_used_gb = system_total_gb - system_available_gb
+    except Exception:
+        pass
+
+    # Build log message
+    seq_str = f" [seqs={sequences}]" if sequences > 0 else ""
+    ctx_str = f" ({context})" if context else ""
+
+    print(f"[MEMORY] {phase}{ctx_str}{seq_str}")
+    print(f"  PyTorch: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+    print(f"  CUDA:    used={cuda_used_gb:.2f}GB, free={cuda_free_gb:.2f}GB, total={cuda_total_gb:.2f}GB")
+    if system_total_gb > 0:
+        pct = (system_used_gb / system_total_gb) * 100
+        print(f"  System:  used={system_used_gb:.2f}GB / {system_total_gb:.2f}GB ({pct:.1f}%)")
+
+    # Return metrics for potential validation
+    return {
+        'phase': phase,
+        'context': context,
+        'sequences': sequences,
+        'pytorch_allocated_gb': allocated,
+        'pytorch_reserved_gb': reserved,
+        'cuda_used_gb': cuda_used_gb,
+        'cuda_free_gb': cuda_free_gb,
+        'system_used_gb': system_used_gb,
+        'system_total_gb': system_total_gb,
+    }
